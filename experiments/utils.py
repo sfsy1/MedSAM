@@ -182,7 +182,7 @@ def segment_slice_sequence(model, slice_paths, start_box, plot, save=None):
 
         slice_id = int(slice_path.stem.split(".")[0])
         out_name = f"start{first_slice}_{slice_id}"
-        save_path = f"extend_3d/{slice_path.parent.stem}/{out_name}" if save else None
+        save_path = f"outputs/extend_3d/{slice_path.parent.stem}/{out_name}" if save else None
 
         plot_results(abdomen, [bbox], segs, zoom_box, plot=plot, save_path=save_path)
 

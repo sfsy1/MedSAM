@@ -33,33 +33,45 @@ def show_mask(mask, ax, color=None, random_color=False):
     ax.imshow(mask_image)
 
 
-def plot_results(img, box, segs, zoom_box, plot=True, save_path=False):
+def plot_results(img, box, seg, zoom_box, plot=True, save_path=False):
     fig, ax = plt.subplots(1, 2, figsize=(5, 3))
     fig.subplots_adjust(wspace=0.02, hspace=0, left=0, right=1, top=1, bottom=0)
     fig.patch.set_facecolor("k")
-    ax[0].imshow(img, vmin=0, vmax=1)
-    show_box(box[0], ax[0])
+    ax[0].imshow(img, vmin=0, vmax=1, cmap="gray")
+    if box:
+        show_box(box[0], ax[0])
     ax[0].set_title("bbox prompt", fontdict={'color': 'white'})
 
-    ax[1].imshow(img, vmin=0, vmax=1)
-    seg_low, seg_mid, seg_high = segs
-    alpha = 0.4
-    show_mask(seg_low, ax[1], color=np.array([1, 0.1, 0.1, alpha]))
-    show_mask(seg_mid, ax[1], color=np.array([1, 1, 0.1, alpha]))
-    show_mask(seg_high, ax[1], color=np.array([0.1, 1, 0.1, alpha]))
-    show_box(box[0], ax[1])
+    ax[1].imshow(img, vmin=0, vmax=1, cmap="gray")
+
+    seg_alpha = 0.4
+    if seg is not None:
+        if type(seg) is np.ndarray:
+            show_mask(seg, ax[1], color=np.array([0.1, 0.1, 1, seg_alpha]))
+        else:
+            seg_low, seg_mid, seg_high = seg
+
+            show_mask(seg_low, ax[1], color=np.array([1, 0.1, 0.1, seg_alpha]))
+            show_mask(seg_mid, ax[1], color=np.array([1, 1, 0.1, seg_alpha]))
+            show_mask(seg_high, ax[1], color=np.array([0.1, 1, 0.1, seg_alpha]))
+
+    if box:
+        show_box(box[0], ax[1])
     ax[1].set_title("segmentation", fontdict={'color': 'white'})
 
-    # zoom into the crop
-    for i in range(len(ax)):
-        ax[i].set_xlim(zoom_box[0], zoom_box[2])
-        ax[i].set_ylim(zoom_box[1], zoom_box[3])
+    if zoom_box:
+        # zoom into the crop
+        for i in range(len(ax)):
+            ax[i].set_xlim(zoom_box[0], zoom_box[2])
+            ax[i].set_ylim(zoom_box[1], zoom_box[3])
 
     for ax in ax:
         ax.axis('off')
     if plot:
         plt.show()
-    if save_path:
+    elif save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(f"{save_path}.jpg", bbox_inches='tight', pad_inches=0, dpi=180)
+        plt.close(fig)
+    else:
         plt.close(fig)

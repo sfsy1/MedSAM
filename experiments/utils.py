@@ -1,16 +1,19 @@
-from pathlib import Path
+from typing import List
 
-import pandas as pd
-from PIL import Image
+import SimpleITK as sitk
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
-from matplotlib import pyplot as plt
+from PIL import Image
 from skimage import transform
-from typing import List
 
 from experiments.constants import LUNG_WIN, ABD_WIN, HU_FACTOR
 from experiments.viz_utils import plot_results
+
+
+def slice_num(filename):
+    return int(filename.split(".")[0])
 
 
 def load_process_csv(csv_path):
@@ -65,6 +68,17 @@ def to_uint8(arr):
     if arr.max() <= 1:
         arr *= 255
     return np.array(arr, dtype=np.uint8)
+
+
+def process_img(img, rgb=False):
+    img_hu = np.array(img, dtype=int)
+    lung, abdomen = window_ct(img_hu)
+    lung_img = Image.fromarray(to_uint8(clip_normalize(lung)))
+    abdomen_img = Image.fromarray(to_uint8(clip_normalize(abdomen)))
+    if rgb:
+        lung_img = lung_img.convert('RGB')
+        abdomen_img = abdomen_img.convert('RGB')
+    return lung_img, abdomen_img
 
 
 def process_slice(slice_path, rgb=False):
@@ -148,7 +162,7 @@ def get_seg_bbox(seg):
     cols = np.any(mask, axis=0)
     ymin, ymax = np.where(rows)[0][[0, -1]]
     xmin, xmax = np.where(cols)[0][[0, -1]]
-    return xmin, ymin, xmax, ymax
+    return [xmin, ymin, xmax, ymax]
 
 
 def add_margin_to_bbox(bbox, margin):
@@ -156,19 +170,24 @@ def add_margin_to_bbox(bbox, margin):
     return [x_min - margin, y_min - margin, x_max + margin, y_max + margin]
 
 
-def expand_to_square_bbox(bbox, ratio):
+def expand_to_square_bbox(bbox, ratio, min_size=None):
     """
     Convert bbox to square w longest side, then expand it by a ratio
     """
     x_min, y_min, x_max, y_max = bbox
     side = max(x_max - x_min, y_max - y_min) * ratio
+    if min_size:
+        side = max(side, min_size)
+
     cx, cy = (x_min + x_max) / 2, (y_min + y_max) / 2
     half_side = side / 2
     return [cx - half_side, cy - half_side, cx + half_side, cy + half_side]
 
 
-
 def segment_slice_sequence(model, slice_paths, start_box, plot, save=None):
+    """
+    Load slice_paths, segment them in order, return slices + segs
+    """
     # the order of slice matters - start with key slice then extend out
     zoom_box = expand_to_square_bbox(start_box, 4)
     slices = []
@@ -194,3 +213,65 @@ def segment_slice_sequence(model, slice_paths, start_box, plot, save=None):
         slice_segs.append(seg)
 
     return slices, slice_segs
+
+
+def segment_slices(model, slices, indices, start_box, plot=False, save=False, margin_ratio=0.1):
+    # the order of slice matters - start with key slice then extend out
+    # area to show
+    zoom_box = expand_to_square_bbox(start_box, 4, min_size=100)
+    slice_segs = []
+    bbox = start_box.copy()
+    for i, slice in zip(indices, slices):
+        lung, abdomen = process_img(slice, rgb=True)
+        seg = segment(abdomen, bbox, model)
+        segs = split_seg(seg)
+
+        # out_name = f"start{indices[0]}_{i}"
+        # save_path = f"outputs/extend_3d/{slice_path.parent.stem}/{out_name}" if save else None
+        # plot_results(abdomen, [bbox], segs, zoom_box, plot=plot, save_path=None)
+
+        # update bbox
+        if segs[0].sum() == 0:
+            break
+        bbox = get_seg_bbox(segs[0])
+        margin = round(margin_ratio * max(bbox[2] - bbox[0], bbox[3] - bbox[1])) + 1
+        bbox = add_margin_to_bbox(bbox, margin)
+        slice_segs.append(seg)
+
+    return slice_segs
+
+
+def generate_seg(img_path, seg_path, medsam) -> np.ndarray:
+    # load ct and segmentation
+    ct = sitk.ReadImage(img_path)
+    seg = sitk.ReadImage(seg_path)
+    ct_array = sitk.GetArrayFromImage(ct)
+    seg_array = sitk.GetArrayFromImage(seg)
+
+    # get largest slice to be the key slice
+    seg_slice_size = seg_array.sum(axis=(1, 2))
+    seg_indices = np.nonzero(seg_slice_size)[0]
+    key_index = seg_slice_size.argmax()
+
+    ## Note: Only run SAM on slices with segments i.e. doesn't test how SAM stop segmenting
+
+    # get sequence of slices indices for up and down
+    up_indices = [i for i in seg_indices if i > key_index]
+    down_indices = [i for i in seg_indices if i < key_index][::-1]
+
+    # get bbox from GT seg
+    start_box = get_seg_bbox(seg_array[key_index])
+
+    # segment key slice, then up and down
+    seg_key = segment_slices(medsam, ct_array[[key_index]], [key_index], start_box)
+    segs_up = segment_slices(medsam, ct_array[up_indices], up_indices, start_box)
+    segs_down = segment_slices(medsam, ct_array[down_indices + [63]], down_indices + [63], start_box)
+
+    # insert seg into an empty array size of original CT
+    full_vol_seg = np.zeros(ct_array.shape)
+    vol_seg = np.stack(segs_down[::-1] + seg_key + segs_up[1:])
+    for idx, slice in zip(seg_indices, vol_seg):
+        full_vol_seg[idx] = slice
+
+    # binary mask
+    return (full_vol_seg > 0.5).astype(np.uint8)

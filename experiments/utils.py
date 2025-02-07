@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from PIL import Image
 from skimage import transform
 
-from experiments.constants import LUNG_WIN, ABD_WIN, HU_FACTOR
+from experiments.constants import LUNG_WIN, ABD_WIN, BONE_WIN, HU_FACTOR, ALL_WIN
 from experiments.viz_utils import plot_results
 
 
@@ -61,7 +61,8 @@ def apply_window(image, center, width):
 def window_ct(ct_slice):
     lung = apply_window(ct_slice, LUNG_WIN['center'], LUNG_WIN['width'])
     abdomen = apply_window(ct_slice, ABD_WIN['center'], ABD_WIN['width'])
-    return lung, abdomen
+    bone = apply_window(ct_slice, BONE_WIN['center'], BONE_WIN['width'])
+    return lung, abdomen, bone
 
 
 def to_uint8(arr):
@@ -70,27 +71,13 @@ def to_uint8(arr):
     return np.array(arr, dtype=np.uint8)
 
 
-def process_img(img, rgb=False):
-    img_hu = np.array(img, dtype=int)
-    lung, abdomen = window_ct(img_hu)
-    lung_img = Image.fromarray(to_uint8(clip_normalize(lung)))
-    abdomen_img = Image.fromarray(to_uint8(clip_normalize(abdomen)))
-    if rgb:
-        lung_img = lung_img.convert('RGB')
-        abdomen_img = abdomen_img.convert('RGB')
-    return lung_img, abdomen_img
-
+def process_img_array(img_hu: np.ndarray, rgb=False):
+    lung, abdomen, bone = window_ct(img_hu)
+    return lung, abdomen, bone
 
 def process_slice(slice_path, rgb=False):
     img = Image.open(slice_path)
-    img_hu = np.array(img, dtype=int) - HU_FACTOR
-    lung, abdomen = window_ct(img_hu)
-    lung_img = Image.fromarray(to_uint8(clip_normalize(lung)))
-    abdomen_img = Image.fromarray(to_uint8(clip_normalize(abdomen)))
-    if rgb:
-        lung_img = lung_img.convert('RGB')
-        abdomen_img = abdomen_img.convert('RGB')
-    return lung_img, abdomen_img
+    return process_img_array(img)
 
 
 def process_bbox_str(bbox):
@@ -99,11 +86,7 @@ def process_bbox_str(bbox):
 
 # ------------------------- MedSAM Utility Functions -------------------------
 
-def transform_img(img_np, device):
-    if len(img_np.shape) == 2:
-        img_3c = np.repeat(img_np[:, :, None], 3, axis=-1)
-    else:
-        img_3c = img_np
+def transform_img(img_3c, device):
     img_1024 = transform.resize(
         img_3c, (1024, 1024), order=3, preserve_range=True, anti_aliasing=True
     ).astype(np.uint8)
@@ -136,8 +119,11 @@ def medsam_inference(medsam_model, img_embed, box_1024, H, W):
     return low_res_pred.squeeze().cpu().numpy()
 
 
-def segment(img: Image, bbox, model):
-    img_np = np.array(img.convert('RGB'))
+def segment(img, bbox, model):
+    # img_np = np.array(img.convert('RGB'))
+    img_np = np.array(img) if type(img) is Image.Image else img
+    if len(img_np.shape) == 2:
+        img_np = np.repeat(img_np[:, :, None], 3, axis=-1)
     in_tensor = transform_img(img_np, model.device)
 
     with torch.no_grad():
@@ -184,52 +170,30 @@ def expand_to_square_bbox(bbox, ratio, min_size=None):
     return [cx - half_side, cy - half_side, cx + half_side, cy + half_side]
 
 
-def segment_slice_sequence(model, slice_paths, start_box, plot, save=None):
-    """
-    Load slice_paths, segment them in order, return slices + segs
-    """
-    # the order of slice matters - start with key slice then extend out
-    zoom_box = expand_to_square_bbox(start_box, 4)
-    slices = []
-    slice_segs = []
-    bbox = start_box.copy()
-    first_slice = int(slice_paths[0].stem.split(".")[0])
-    for i, slice_path in enumerate(slice_paths):
-        lung, abdomen = process_slice(slice_path, rgb=True)
-        seg = segment(abdomen, bbox, model)
-        segs = split_seg(seg)
-
-        slice_id = int(slice_path.stem.split(".")[0])
-        out_name = f"start{first_slice}_{slice_id}"
-        save_path = f"outputs/extend_3d/{slice_path.parent.stem}/{out_name}" if save else None
-
-        plot_results(abdomen, [bbox], segs, zoom_box, plot=plot, save_path=save_path)
-
-        # update bbox
-        bbox = get_seg_bbox(segs[0])
-        margin = round(0.1 * max(bbox[2] - bbox[0], bbox[3] - bbox[1]))
-        bbox = add_margin_to_bbox(bbox, margin)
-        slices.append(abdomen)
-        slice_segs.append(seg)
-
-    return slices, slice_segs
-
-
-def segment_slices(model, slices, indices, start_box, plot=False, save=False, margin_ratio=0.1):
+def segment_slices(
+        model, slices, start_box, slice_group, slice_indices, window,
+        plot=False, save=False, margin_ratio=0.1
+):
     # the order of slice matters - start with key slice then extend out
     # area to show
-    zoom_box = expand_to_square_bbox(start_box, 4, min_size=100)
+    zoom_box = expand_to_square_bbox(start_box, 3, min_size=200)
     slice_segs = []
     bbox = start_box.copy()
-    for i, slice in zip(indices, slices):
-        lung, abdomen = process_img(slice, rgb=True)
-        seg = segment(abdomen, bbox, model)
+
+    for slice_img, i in zip(slices, slice_indices):
+        slice_arr = np.array(slice_img, dtype=int) - HU_FACTOR
+        if window:
+            lung, abdomen, bone = window_ct(slice_arr)
+            slice_arr = abdomen
+        else:
+            slice_arr = apply_window(slice_arr, ALL_WIN['center'], ALL_WIN['width'])
+
+        seg = segment(slice_arr, bbox, model)
         segs = split_seg(seg)
 
-        # out_name = f"start{indices[0]}_{i}"
-        # save_path = f"outputs/extend_3d/{slice_path.parent.stem}/{out_name}" if save else None
-        # plot_results(abdomen, [bbox], segs, zoom_box, plot=plot, save_path=None)
-
+        out_name = f"start{slice_indices[0]}_{i}"
+        save_path = f"outputs/extend_3d/{slice_group}/{out_name}" if save else None
+        plot_results(slice_arr, [bbox], segs, zoom_box, plot=plot, save_path=save_path)
         # update bbox
         if segs[0].sum() == 0:
             break
@@ -237,7 +201,7 @@ def segment_slices(model, slices, indices, start_box, plot=False, save=False, ma
         margin = round(margin_ratio * max(bbox[2] - bbox[0], bbox[3] - bbox[1])) + 1
         bbox = add_margin_to_bbox(bbox, margin)
         slice_segs.append(seg)
-
+        break
     return slice_segs
 
 

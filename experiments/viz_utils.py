@@ -37,13 +37,12 @@ def plot_results(img, box, seg, zoom_box, plot=True, save_path=False):
     fig, ax = plt.subplots(1, 2, figsize=(5, 3))
     fig.subplots_adjust(wspace=0.02, hspace=0, left=0, right=1, top=1, bottom=0)
     fig.patch.set_facecolor("k")
-    ax[0].imshow(img, vmin=0, vmax=1, cmap="gray")
+    ax[0].imshow(img, cmap="gray")
     if box:
         show_box(box[0], ax[0])
     ax[0].set_title("bbox prompt", fontdict={'color': 'white'})
 
-    ax[1].imshow(img, vmin=0, vmax=1, cmap="gray")
-
+    ax[1].imshow(img, cmap="gray")
     seg_alpha = 0.4
     if seg is not None:
         if type(seg) is np.ndarray:

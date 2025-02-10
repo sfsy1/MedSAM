@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from PIL import Image
 from skimage import transform
 
-from experiments.constants import LUNG_WIN, ABD_WIN, BONE_WIN, HU_FACTOR, ALL_WIN
+from experiments.constants import LUNG_WIN, ABD_WIN, BONE_WIN, HU_FACTOR, ALL_WIN, WINDOWS
 from experiments.viz_utils import plot_results
 
 
@@ -75,6 +75,7 @@ def process_img_array(img_hu: np.ndarray, rgb=False):
     lung, abdomen, bone = window_ct(img_hu)
     return lung, abdomen, bone
 
+
 def process_slice(slice_path, rgb=False):
     img = Image.open(slice_path)
     return process_img_array(img)
@@ -87,12 +88,8 @@ def process_bbox_str(bbox):
 # ------------------------- MedSAM Utility Functions -------------------------
 
 def transform_img(img_3c, device):
-    img_1024 = transform.resize(
-        img_3c, (1024, 1024), order=3, preserve_range=True, anti_aliasing=True
-    ).astype(np.uint8)
-    img_1024 = (img_1024 - img_1024.min()) / np.clip(
-        img_1024.max() - img_1024.min(), a_min=1e-8, a_max=None
-    )
+    img_1024 = transform.resize(img_3c, (1024, 1024), order=3, preserve_range=True, anti_aliasing=True).astype(np.uint8)
+    img_1024 = (img_1024 - img_1024.min()) / np.clip(img_1024.max() - img_1024.min(), a_min=1e-8, a_max=None)
     return torch.tensor(img_1024).float().permute(2, 0, 1).unsqueeze(0).to(device)
 
 
@@ -102,20 +99,12 @@ def medsam_inference(medsam_model, img_embed, box_1024, H, W):
     if len(box_torch.shape) == 2:
         box_torch = box_torch[:, None, :]  # (B, 1, 4)
 
-    sparse_embeddings, dense_embeddings = medsam_model.prompt_encoder(
-        points=None, boxes=box_torch, masks=None,
-    )
-    low_res_logits, _ = medsam_model.mask_decoder(
-        image_embeddings=img_embed,
-        image_pe=medsam_model.prompt_encoder.get_dense_pe(),
-        sparse_prompt_embeddings=sparse_embeddings,
-        dense_prompt_embeddings=dense_embeddings,
-        multimask_output=False,
-    )
+    sparse_embeddings, dense_embeddings = medsam_model.prompt_encoder(points=None, boxes=box_torch, masks=None, )
+    low_res_logits, _ = medsam_model.mask_decoder(image_embeddings=img_embed,
+        image_pe=medsam_model.prompt_encoder.get_dense_pe(), sparse_prompt_embeddings=sparse_embeddings,
+        dense_prompt_embeddings=dense_embeddings, multimask_output=False, )
     low_res_pred = torch.sigmoid(low_res_logits)
-    low_res_pred = F.interpolate(
-        low_res_pred, size=(H, W), mode="bilinear", align_corners=False
-    )
+    low_res_pred = F.interpolate(low_res_pred, size=(H, W), mode="bilinear", align_corners=False)
     return low_res_pred.squeeze().cpu().numpy()
 
 
@@ -170,10 +159,8 @@ def expand_to_square_bbox(bbox, ratio, min_size=None):
     return [cx - half_side, cy - half_side, cx + half_side, cy + half_side]
 
 
-def segment_slices(
-        model, slices, start_box, slice_group, slice_indices, window,
-        plot=False, save=False, margin_ratio=0.1
-):
+def segment_slices(model, slices, start_box, slice_group, slice_indices, window, plot=False, save=False,
+        margin_ratio=0.1):
     # the order of slice matters - start with key slice then extend out
     # area to show
     zoom_box = expand_to_square_bbox(start_box, 3, min_size=200)
@@ -181,10 +168,17 @@ def segment_slices(
     bbox = start_box.copy()
 
     for slice_img, i in zip(slices, slice_indices):
-        slice_arr = np.array(slice_img, dtype=int) - HU_FACTOR
+        slice_arr = np.array(slice_img, dtype=int) # - HU_FACTOR
+        lung, abdomen, bone = window_ct(slice_arr)
         if window:
-            lung, abdomen, bone = window_ct(slice_arr)
-            slice_arr = abdomen
+            if window == 'lung':
+                slice_arr = lung
+            elif window == 'abdomen':
+                slice_arr = abdomen
+            elif window == 'bone':
+                slice_arr = bone
+            else:
+                raise ValueError(f"Window must be one of {WINDOWS}.")
         else:
             slice_arr = apply_window(slice_arr, ALL_WIN['center'], ALL_WIN['width'])
 
@@ -193,6 +187,8 @@ def segment_slices(
 
         out_name = f"start{slice_indices[0]}_{i}"
         save_path = f"outputs/extend_3d/{slice_group}/{out_name}" if save else None
+        if plot:
+            print(f"Start {slice_indices[0]}, current: {i}")
         plot_results(slice_arr, [bbox], segs, zoom_box, plot=plot, save_path=save_path)
         # update bbox
         if segs[0].sum() == 0:
@@ -201,11 +197,10 @@ def segment_slices(
         margin = round(margin_ratio * max(bbox[2] - bbox[0], bbox[3] - bbox[1])) + 1
         bbox = add_margin_to_bbox(bbox, margin)
         slice_segs.append(seg)
-        break
     return slice_segs
 
 
-def generate_seg(img_path, seg_path, medsam) -> np.ndarray:
+def generate_seg(img_path, seg_path, medsam, folder, window, plot=False, save=False) -> np.ndarray:
     # load ct and segmentation
     ct = sitk.ReadImage(img_path)
     seg = sitk.ReadImage(seg_path)
@@ -215,25 +210,32 @@ def generate_seg(img_path, seg_path, medsam) -> np.ndarray:
     # get largest slice to be the key slice
     seg_slice_size = seg_array.sum(axis=(1, 2))
     seg_indices = np.nonzero(seg_slice_size)[0]
-    key_index = seg_slice_size.argmax()
+
+
+    k = seg_slice_size.argmax()
 
     ## Note: Only run SAM on slices with segments i.e. doesn't test how SAM stop segmenting
 
     # get sequence of slices indices for up and down
-    up_indices = [i for i in seg_indices if i > key_index]
-    down_indices = [i for i in seg_indices if i < key_index][::-1]
+    up_indices = [i for i in seg_indices if i > k]
+    down_indices = [i for i in seg_indices if i < k][::-1]
 
     # get bbox from GT seg
-    start_box = get_seg_bbox(seg_array[key_index])
+    start_box = get_seg_bbox(seg_array[k])
 
     # segment key slice, then up and down
-    seg_key = segment_slices(medsam, ct_array[[key_index]], [key_index], start_box)
-    segs_up = segment_slices(medsam, ct_array[up_indices], up_indices, start_box)
-    segs_down = segment_slices(medsam, ct_array[down_indices + [63]], down_indices + [63], start_box)
+    segs_up = segment_slices(
+        medsam, ct_array[[k] + up_indices], start_box, folder, [k] + up_indices, window,
+        plot, save
+    )
+    segs_down = segment_slices(
+        medsam, ct_array[down_indices], start_box, folder, down_indices, window,
+        plot, save
+    )
 
     # insert seg into an empty array size of original CT
     full_vol_seg = np.zeros(ct_array.shape)
-    vol_seg = np.stack(segs_down[::-1] + seg_key + segs_up[1:])
+    vol_seg = np.stack(segs_down[::-1] + segs_up[1:])
     for idx, slice in zip(seg_indices, vol_seg):
         full_vol_seg[idx] = slice
 

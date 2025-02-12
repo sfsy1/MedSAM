@@ -166,6 +166,8 @@ def segment_slices(model, slices, start_box, slice_group, slice_indices, window,
     zoom_box = expand_to_square_bbox(start_box, 3, min_size=200)
     slice_segs = []
     bbox = start_box.copy()
+    margin = round(margin_ratio * max(bbox[2] - bbox[0], bbox[3] - bbox[1])) + 1
+    bbox = add_margin_to_bbox(bbox, margin)
 
     for slice_img, i in zip(slices, slice_indices):
         slice_arr = np.array(slice_img, dtype=int) # - HU_FACTOR
@@ -178,7 +180,7 @@ def segment_slices(model, slices, start_box, slice_group, slice_indices, window,
             elif window == 'bone':
                 slice_arr = bone
             else:
-                raise ValueError(f"Window must be one of {WINDOWS}.")
+                raise ValueError(f"Window must be one of {WINDOWS} or None.")
         else:
             slice_arr = apply_window(slice_arr, ALL_WIN['center'], ALL_WIN['width'])
 
@@ -211,7 +213,6 @@ def generate_seg(img_path, seg_path, medsam, folder, window, plot=False, save=Fa
     seg_slice_size = seg_array.sum(axis=(1, 2))
     seg_indices = np.nonzero(seg_slice_size)[0]
 
-
     k = seg_slice_size.argmax()
 
     ## Note: Only run SAM on slices with segments i.e. doesn't test how SAM stop segmenting
@@ -235,7 +236,7 @@ def generate_seg(img_path, seg_path, medsam, folder, window, plot=False, save=Fa
 
     # insert seg into an empty array size of original CT
     full_vol_seg = np.zeros(ct_array.shape)
-    vol_seg = np.stack(segs_down[::-1] + segs_up[1:])
+    vol_seg = np.stack(segs_down[::-1] + segs_up)
     for idx, slice in zip(seg_indices, vol_seg):
         full_vol_seg[idx] = slice
 

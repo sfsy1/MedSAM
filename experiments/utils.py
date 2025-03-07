@@ -242,3 +242,44 @@ def generate_seg(img_path, seg_path, medsam, folder, window, plot=False, save=Fa
 
     # binary mask
     return (full_vol_seg > 0.5).astype(np.uint8)
+
+
+def generate_seg_on_slices(img_path, seg_path, medsam) -> np.ndarray:
+    # load ct and segmentation
+    ct = sitk.ReadImage(img_path)
+    seg = sitk.ReadImage(seg_path)
+    ct_array = sitk.GetArrayFromImage(ct)
+    seg_array = sitk.GetArrayFromImage(seg)
+
+    # get largest slice to be the key slice
+    seg_slice_size = seg_array.sum(axis=(1, 2))
+    seg_indices = np.nonzero(seg_slice_size)[0]
+
+    # preds = []
+    # segs = []
+    dices = []
+    vol_scores = []
+    for i in seg_indices:
+        ct_slice = ct_array[i]
+        seg_slice = seg_array[i]
+        bbox = get_seg_bbox(seg_slice)
+        margin_ratio=0.1
+        margin = round(margin_ratio * max(bbox[2] - bbox[0], bbox[3] - bbox[1])) + 1
+        bbox = add_margin_to_bbox(bbox, margin)
+
+        slice_arr = apply_window(ct_slice, ALL_WIN['center'], ALL_WIN['width'])
+        pred = segment(slice_arr, bbox, medsam)
+        # preds.append(pred)
+        # segs.append(seg_slice)
+
+        pred_mask = pred > 0.5
+
+        p = pred_mask
+        s = seg_slice > 0
+
+        intersection = (p & s).sum()  # Logical AND and sum to get intersection
+        dices.append((2. * intersection + 1e-6) / (p.sum() + s.sum() + 1e-6))
+
+        vol_scores.append(1 - abs(p.sum() - s.sum()) / s.sum())
+
+    return dices, vol_scores
